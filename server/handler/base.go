@@ -55,16 +55,16 @@ func PostStatusIfChanged(ctx context.Context, client *github.Client, owner, repo
 	if appName != "" {
 		opt := &github.ListOptions{PerPage: 100}
 		for {
-			// The combined status contains only the latest status for each context.
-			// Do not use an older matching status to hide a newer state transition.
-			combined, resp, err := client.Repositories.GetCombinedStatus(ctx, owner, repo, ref, opt)
+			// Statuses are newest first and include the creator. Only compare the
+			// first matching context so an older status cannot hide a transition.
+			statuses, resp, err := client.Repositories.ListStatuses(ctx, owner, repo, ref, opt)
 			if err != nil {
 				// A failed optimization must not prevent an approval or revocation.
 				zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to look up current status; posting evaluation result")
 				break
 			}
 
-			for _, current := range combined.Statuses {
+			for _, current := range statuses {
 				if current.GetContext() != status.GetContext() {
 					continue
 				}
