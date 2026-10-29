@@ -49,6 +49,43 @@ func PostStatus(ctx context.Context, client *github.Client, owner, repo, ref str
 	return errors.WithStack(err)
 }
 
+// PostStatusIfChanged suppresses redundant evaluation updates, not forced writes
+// such as the status handler's response to a forged policy-bot status.
+func PostStatusIfChanged(ctx context.Context, client *github.Client, owner, repo, ref, appName string, status github.RepoStatus) error {
+	if appName != "" {
+		opt := &github.ListOptions{PerPage: 100}
+		for {
+			// The combined status contains only the latest status for each context.
+			// Do not use an older matching status to hide a newer state transition.
+			combined, resp, err := client.Repositories.GetCombinedStatus(ctx, owner, repo, ref, opt)
+			if err != nil {
+				// A failed optimization must not prevent an approval or revocation.
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to look up current status; posting evaluation result")
+				break
+			}
+
+			for _, current := range combined.Statuses {
+				if current.GetContext() != status.GetContext() {
+					continue
+				}
+				if current.GetCreator().GetLogin() == appName+"[bot]" &&
+					current.GetState() == status.GetState() &&
+					current.GetDescription() == status.GetDescription() &&
+					current.GetTargetURL() == status.GetTargetURL() {
+					zerolog.Ctx(ctx).Debug().Msgf("Skipping unchanged %q status on %s", status.GetContext(), ref)
+					return nil
+				}
+				return PostStatus(ctx, client, owner, repo, ref, status)
+			}
+			if resp.NextPage == 0 {
+				break
+			}
+			opt.Page = resp.NextPage
+		}
+	}
+	return PostStatus(ctx, client, owner, repo, ref, status)
+}
+
 func (b *Base) PreparePRContext(ctx context.Context, installationID int64, pr *github.PullRequest) (context.Context, zerolog.Logger) {
 	ctx, logger := githubapp.PreparePRContext(ctx, installationID, pr.GetBase().GetRepo(), pr.GetNumber())
 
@@ -92,6 +129,7 @@ func (b *Base) NewEvalContext(ctx context.Context, installationID int64, loc pul
 
 		Options:   b.PullOpts,
 		PublicURL: b.BaseConfig.PublicURL,
+		AppName:   b.AppName,
 
 		PullContext: prctx,
 		Config:      fetchedConfig,
